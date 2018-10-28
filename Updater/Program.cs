@@ -31,7 +31,7 @@ namespace AddonUpdater
 				var addons = EnumerateAddonFiles(addonDirectory).Select(o => new Addon(o)).OrderBy(o => o.Archive).ToList();
 
 				Console.WriteLine("Installing updates...");
-				var unused = Directory.EnumerateDirectories(wowDirectory).Select(o => o.Substring(wowDirectory.Length + 1)).ToHashSet();
+				var unused = GetExistingAddons(wowDirectory).ToHashSet();
 
 				var conflicts = (
 					from addon in addons
@@ -80,12 +80,8 @@ namespace AddonUpdater
 				foreach (var folder in unused)
 				{
 					ranUpdate = true;
-					var path = Path.Combine(wowDirectory, folder);
-					if (!Directory.Exists(Path.Combine(path, ".git")) && !File.Exists(Path.Combine(path, ".keep")))
-					{
-						Console.WriteLine($"< {folder}");
-						Directory.Delete(Path.Combine(wowDirectory, folder), true);
-					}
+					Console.WriteLine($"< {folder}");
+					Directory.Delete(Path.Combine(wowDirectory, folder), true);
 				}
 
 				Console.WriteLine(ranUpdate ? "Done." : "No updates needed.");
@@ -275,6 +271,21 @@ namespace AddonUpdater
 		{
 			var prefix = $"## {type}:";
 			return ReadLines(entry.Open()).FirstOrDefault(o => o.StartsWith(prefix))?.Substring(prefix.Length).Trim();
+		}
+
+		private static IEnumerable<string> GetExistingAddons(string wowDirectory)
+		{
+			string toFullPath(string folder) => Path.Combine(wowDirectory, folder);
+
+			var keepFile = toFullPath(".keep");
+			var keepAddons = File.Exists(keepFile) ? File.ReadLines(keepFile).Select(toFullPath).ToHashSet() : null;
+
+			return Directory.EnumerateDirectories(wowDirectory)
+				.Where(path =>
+					(keepAddons == null || !keepAddons.Contains(path))
+					&& !Directory.Exists(Path.Combine(path, ".git"))
+					&& !File.Exists(Path.Combine(path, ".keep")))
+				.Select(o => o.Substring(wowDirectory.Length + 1));
 		}
 
 		private static readonly Regex escapeSequences = new Regex(@"\|(?:c[0-9a-fA-F]{8}|r)");
