@@ -138,7 +138,12 @@ namespace AddonUpdater
 
 			using (var client = new HttpClient())
 			{
-				var response = await client.GetAsync(url);
+				var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, url) { Headers = { IfModifiedSince = existingLastModified } });
+
+				if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+				{
+					return Path.Combine(addonDirectory, existingName);
+				}
 
 				var fileName = response.Content.Headers.ContentDisposition?.FileName.Trim('"') ?? Path.GetFileName(response.RequestMessage.RequestUri.LocalPath);
 				var fileSize = response.Content.Headers.ContentLength;
