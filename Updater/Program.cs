@@ -131,13 +131,22 @@ namespace AddonUpdater
 		private static async Task<string> DownloadFile(string addonDirectory, XElement addon)
 		{
 			var url = addon.Attribute("url")?.Value;
+			var regex = addon.Attribute("regex")?.Value;
+			var regexReplace = addon.Attribute("replace")?.Value;
 			var existingName = addon.Attribute("file")?.Value;
 			var existingSize = ParseLong(addon.Attribute("size")?.Value);
 			var existingLastModified = ParseDateTimeOffset(addon.Attribute("lastModified")?.Value);
-			var existingPath = Path.Combine(addonDirectory, existingName);
+			var existingPath = existingName != null ? Path.Combine(addonDirectory, existingName) : null;
 
 			using (var client = new HttpClient())
 			{
+				if (regex != null)
+				{
+					var urldata = await client.GetStringAsync(url);
+					var relativePath = Regex.Replace(urldata, $"^.*?{regex}.*$", regexReplace, RegexOptions.Singleline);
+					url = new Uri(new Uri(url), relativePath).AbsoluteUri;
+				}
+
 				var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, url) { Headers = { IfModifiedSince = existingLastModified } });
 
 				if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
@@ -145,7 +154,7 @@ namespace AddonUpdater
 					return Path.Combine(addonDirectory, existingName);
 				}
 
-				var fileName = response.Content.Headers.ContentDisposition?.FileName.Trim('"') ?? Path.GetFileName(response.RequestMessage.RequestUri.LocalPath);
+				var fileName = response.Content.Headers.ContentDisposition?.FileName.Trim('"') ?? Path.GetFileName(UrlDecode(response.RequestMessage.RequestUri.LocalPath));
 				var fileSize = response.Content.Headers.ContentLength;
 				var lastModified = response.Content.Headers.LastModified;
 				var path = Path.Combine(addonDirectory, fileName);
@@ -170,6 +179,11 @@ namespace AddonUpdater
 
 				return path;
 			}
+		}
+
+		private static string UrlDecode(string str)
+		{
+			return Uri.UnescapeDataString(str.Replace("+", " "));
 		}
 
 		private static long? ParseLong(string value)

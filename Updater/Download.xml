@@ -1,10 +1,11 @@
 ﻿<?xml version="1.0" encoding="utf-8" ?>
 <Addons>
 	<Addon url="https://www.wowace.com/projects/angry-world-quests/files/latest" />
-	<Addon url="https://wow.curseforge.com/projects/auctionator/files/latest" />
-	<Addon url="https://dev.deadlybossmods.com/download.php?id=1" />
-	<Addon url="https://wow.curseforge.com/projects/dejacharacterstats/files/latest" />
-	<Addon url="https://wow.curseforge.com/projects/ovale/files/latest" />
-	<Addon url="https://wow.curseforge.com/projects/pawn/files/latest" />
+	<Addon url="https://www.curseforge.com/wow/addons/auctionator/files" regex="(/wow/addons/auctionator/download/\d+)" replace="$1/file" />
+	<Addon url="https://www.curseforge.com/wow/addons/deadly-boss-mods/files" regex="(/wow/addons/deadly-boss-mods/download/\d+)" replace="$1/file" />
+	<Addon url="https://www.curseforge.com/wow/addons/dejacharacterstats/files" regex="(/wow/addons/dejacharacterstats/download/\d+)" replace="$1/file" />
+	<Addon url="https://www.curseforge.com/wow/addons/hekili/files" regex="(/wow/addons/hekili/download/\d+)" replace="$1/file" />
+	<Addon url="https://www.curseforge.com/wow/addons/pawn/files" regex="(/wow/addons/pawn/download/\d+)" replace="$1/file" />
 	<Addon url="https://www.wowace.com/projects/skada/files/latest" />
+	<Addon url="https://www.curseforge.com/wow/addons/exorsus-raid-tools/files" regex="(/wow/addons/exorsus-raid-tools/download/\d+)" replace="$1/file" />
 </Addons>
