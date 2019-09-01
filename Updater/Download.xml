@@ -1,11 +1,15 @@
 ﻿<?xml version="1.0" encoding="utf-8" ?>
 <Addons>
-	<Addon url="https://www.wowace.com/projects/angry-world-quests/files/latest" />
-	<Addon url="https://www.curseforge.com/wow/addons/auctionator/files" regex="(/wow/addons/auctionator/download/\d+)" replace="$1/file" />
-	<Addon url="https://www.curseforge.com/wow/addons/deadly-boss-mods/files" regex="(/wow/addons/deadly-boss-mods/download/\d+)" replace="$1/file" />
-	<Addon url="https://www.curseforge.com/wow/addons/dejacharacterstats/files" regex="(/wow/addons/dejacharacterstats/download/\d+)" replace="$1/file" />
-	<Addon url="https://www.curseforge.com/wow/addons/hekili/files" regex="(/wow/addons/hekili/download/\d+)" replace="$1/file" />
-	<Addon url="https://www.curseforge.com/wow/addons/pawn/files" regex="(/wow/addons/pawn/download/\d+)" replace="$1/file" />
-	<Addon url="https://www.wowace.com/projects/skada/files/latest" />
-	<Addon url="https://www.curseforge.com/wow/addons/exorsus-raid-tools/files" regex="(/wow/addons/exorsus-raid-tools/download/\d+)" replace="$1/file" />
+	<Addon type="_retail_" url="https://www.wowace.com/projects/angry-world-quests/files/latest" />
+	<Addon type="_retail_" url="https://www.curseforge.com/wow/addons/auctionator/files" />
+	<Addon type="_retail_" url="https://www.curseforge.com/wow/addons/deadly-boss-mods/files" />
+	<Addon type="_retail_" url="https://www.curseforge.com/wow/addons/dejacharacterstats/files" />
+	<Addon type="_retail_" url="https://www.curseforge.com/wow/addons/hekili/files" />
+	<Addon type="_retail_" url="https://www.curseforge.com/wow/addons/pawn/files" />
+	<Addon type="_retail_" url="https://www.wowace.com/projects/skada/files/latest" />
+	<Addon type="_retail_" url="https://www.curseforge.com/wow/addons/exorsus-raid-tools/files" />
+	<Addon type="_classic_" url="https://cdn.wowinterface.com/downloads/file24958/" />
+	<Addon type="_classic_" url="https://www.curseforge.com/wow/addons/deadly-boss-mods/files" />
+	<Addon type="_classic_" url="https://www.curseforge.com/wow/addons/recount/files" />
+	<Addon type="_classic_" url="https://www.curseforge.com/wow/addons/questie/files" />
 </Addons>

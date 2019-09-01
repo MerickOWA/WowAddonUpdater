@@ -24,19 +24,23 @@ namespace AddonUpdater
 			try
 			{
 				var addonDirectory = ConfigurationManager.AppSettings["AddonFolder"];
-				var wowDirectory = ConfigurationManager.AppSettings["WowFolder"];
+				var wowFolderTemplate = ConfigurationManager.AppSettings["WowFolder"];
 
 				await DownloadFiles(addonDirectory);
 
+				string toWowDirectory(string type) => wowFolderTemplate.Replace("{type}", type);
 				var addons = EnumerateAddonFiles(addonDirectory).Select(o => new Addon(o)).OrderBy(o => o.Archive).ToList();
 
+				var types = addons.Select(o => o.Type).Distinct();
+
 				Console.WriteLine("Installing updates...");
-				var unused = GetExistingAddons(wowDirectory).ToHashSet();
+				var unused = new[] { "_retail_", "_classic_" }.SelectMany(type => GetExistingAddons(type, toWowDirectory(type))).ToHashSet();
 
 				var conflicts = (
 					from addon in addons
+					let type = addon.Type
 					from folder in addon.Folders
-					group addon by folder
+					group addon by (type,folder)
 					into folderAddons
 					where folderAddons.Count() > 1
 					from addon in folderAddons
@@ -45,12 +49,13 @@ namespace AddonUpdater
 				foreach (var addon in conflicts)
 				{
 					Console.WriteLine($"ERROR: {Path.GetFileName(addon.Archive)} conflicts!");
-					unused.RemoveAll(addon.Folders);
+					unused.RemoveAll(addon.Folders.Select(o => (addon.Type, o)));
 				}
 
 				var ranUpdate = false;
 				foreach (var addon in addons.Except(conflicts))
 				{
+					var wowDirectory = toWowDirectory(addon.Type);
 					var installedVersion = GetInstalledVersion(addon.Folders, wowDirectory);
 
 					if (addon.Version != installedVersion)
@@ -74,14 +79,14 @@ namespace AddonUpdater
 						ZipFile.ExtractToDirectory(addon.Archive, wowDirectory);
 					}
 
-					unused.RemoveAll(addon.Folders);
+					unused.RemoveAll(addon.Folders.Select(o => (addon.Type, o)));
 				}
 
-				foreach (var folder in unused)
+				foreach (var item in unused)
 				{
 					ranUpdate = true;
-					Console.WriteLine($"< {folder}");
-					Directory.Delete(Path.Combine(wowDirectory, folder), true);
+					Console.WriteLine($"< {item.type}\\{item.folder}");
+					Directory.Delete(Path.Combine(toWowDirectory(item.type), item.folder), true);
 				}
 
 				Console.WriteLine(ranUpdate ? "Done." : "No updates needed.");
@@ -96,7 +101,7 @@ namespace AddonUpdater
 
 		private static IEnumerable<string> EnumerateAddonFiles(string addonDirectory)
 		{
-			return Directory.EnumerateFiles(addonDirectory, "*.zip").Where(o => !Path.GetFileName(o).StartsWith("_"));
+			return Directory.EnumerateFiles(addonDirectory, "*.zip", SearchOption.AllDirectories).Where(o => !Path.GetFileName(o).StartsWith("_"));
 		}
 
 		private static async Task DownloadFiles(string addonDirectory)
@@ -114,7 +119,7 @@ namespace AddonUpdater
 
 				var addons = root.Elements("Addon");
 
-				var files = await Task.WhenAll(addons.Select(o => Task.Run(() => DownloadFile(addonDirectory, o))));
+				var files = (await Task.WhenAll(addons.Select(o => Task.Run(() => DownloadFile(addonDirectory, o))))).Where(o => o != null);
 
 				root.SetAttributeValue("lastCheck", lastCheckDate = now);
 				document.Save(downloadFile);
@@ -128,26 +133,63 @@ namespace AddonUpdater
 			}
 		}
 
-		private static async Task<string> DownloadFile(string addonDirectory, XElement addon)
+		private static async Task<string> GetCurseForgeUrl(string type, string url)
 		{
+			var addon = Path.GetFileName(Path.GetDirectoryName(url));
+
+			var web = new HtmlAgilityPack.HtmlWeb();
+			var doc = await web.LoadFromWebAsync(url);
+
+			var links = doc.DocumentNode.SelectNodes("//table/tbody/tr")
+				.Where(o => o.SelectSingleNode("td[1]").InnerText.Trim() == "R")
+				.Select(o => new
+				{
+					url = o.SelectSingleNode("td[2]/a").GetAttributeValue("href", ""),
+					version = o.SelectSingleNode("td[5]").InnerText.Trim()
+				});
+
+			switch (type)
+			{
+				case "_retail_": links = links.Where(o => !o.version.StartsWith("1.")); break;
+				case "_classic_": links = links.Where(o => o.version.StartsWith("1.")); break;
+			}
+
+			var link =  links.FirstOrDefault();
+			if (link == null)
+			{
+				return null;
+			}
+
+			var relativeUrl = link.url.Replace("files", "download") + "/file";
+
+			return new Uri(new Uri(url), relativeUrl).AbsoluteUri;
+		}
+
+		private static Task<string> GetDownloadUrl(string type, string url)
+		{
+			return url.Contains("curseforge.com") ? GetCurseForgeUrl(type, url) : Task.FromResult(url);
+		}
+
+		private static async Task<string> DownloadFile(string parentDirectory, XElement addon)
+		{
+			var type = addon.Attribute("type")?.Value;
 			var url = addon.Attribute("url")?.Value;
-			var regex = addon.Attribute("regex")?.Value;
-			var regexReplace = addon.Attribute("replace")?.Value;
 			var existingName = addon.Attribute("file")?.Value;
 			var existingSize = ParseLong(addon.Attribute("size")?.Value);
 			var existingLastModified = ParseDateTimeOffset(addon.Attribute("lastModified")?.Value);
+			var addonDirectory = Path.Combine(parentDirectory, type);
 			var existingPath = existingName != null ? Path.Combine(addonDirectory, existingName) : null;
 
 			using (var client = new HttpClient())
 			{
-				if (regex != null)
+				var downloadUrl = await GetDownloadUrl(type, url);
+				if (downloadUrl == null)
 				{
-					var urldata = await client.GetStringAsync(url);
-					var relativePath = Regex.Replace(urldata, $"^.*?{regex}.*$", regexReplace, RegexOptions.Singleline);
-					url = new Uri(new Uri(url), relativePath).AbsoluteUri;
+					Console.WriteLine($"ERROR: No download found for {type}: {url}");
+					return null;
 				}
 
-				var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, url) { Headers = { IfModifiedSince = existingLastModified } });
+				var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, downloadUrl) { Headers = { IfModifiedSince = existingLastModified } });
 
 				if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
 				{
@@ -233,6 +275,8 @@ namespace AddonUpdater
 				}
 			}
 
+			public string Type { get { return Path.GetFileName(Path.GetDirectoryName(Archive)); } }
+
 			public string Archive { get; }
 
 			public IReadOnlyCollection<string> Folders { get; }
@@ -292,7 +336,7 @@ namespace AddonUpdater
 			return ReadLines(entry.Open()).FirstOrDefault(o => o.StartsWith(prefix))?.Substring(prefix.Length).Trim();
 		}
 
-		private static IEnumerable<string> GetExistingAddons(string wowDirectory)
+		private static IEnumerable<(string type, string folder)> GetExistingAddons(string type, string wowDirectory)
 		{
 			string toFullPath(string folder) => Path.Combine(wowDirectory, folder);
 
@@ -304,7 +348,7 @@ namespace AddonUpdater
 					(keepAddons == null || !keepAddons.Contains(path))
 					&& !Directory.Exists(Path.Combine(path, ".git"))
 					&& !File.Exists(Path.Combine(path, ".keep")))
-				.Select(o => o.Substring(wowDirectory.Length + 1));
+				.Select(o => (type, o.Substring(wowDirectory.Length + 1)));
 		}
 
 		private static readonly Regex escapeSequences = new Regex(@"\|(?:c[0-9a-fA-F]{8}|r)");
