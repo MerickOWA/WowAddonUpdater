@@ -10,6 +10,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using Microsoft.Win32;
 
 namespace AddonUpdater
 {
@@ -24,9 +25,9 @@ namespace AddonUpdater
 			try
 			{
 				var addonDirectory = ConfigurationManager.AppSettings["AddonFolder"];
-				var wowFolderTemplate = ConfigurationManager.AppSettings["WowFolder"];
+				var wowFolderTemplate = GetWowFolderTemplate();
 
-				await DownloadFiles(addonDirectory);
+				//await DownloadFiles(addonDirectory);
 
 				string toWowDirectory(string type) => wowFolderTemplate.Replace("{type}", type);
 				var addons = EnumerateAddonFiles(addonDirectory).Select(o => new Addon(o)).OrderBy(o => o.Archive).ToList();
@@ -99,6 +100,17 @@ namespace AddonUpdater
 			Console.ReadKey(true);
 		}
 
+		private static string GetWowFolderTemplate()
+		{
+			var installPath = (string)Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Blizzard Entertainment\World of Warcraft", "InstallPath", null);
+			if (installPath == null || !installPath.EndsWith(@"\_retail_\"))
+				throw new Exception("World of Warcraft install not found?");
+
+			var basePath = installPath.Substring(0, installPath.Length - 10);
+
+			return @$"{basePath}\{{type}}\Interface\AddOns";
+		}
+
 		private static IEnumerable<string> EnumerateAddonFiles(string addonDirectory)
 		{
 			return Directory.EnumerateFiles(addonDirectory, "*.zip", SearchOption.AllDirectories).Where(o => !Path.GetFileName(o).StartsWith("_"));
@@ -110,14 +122,13 @@ namespace AddonUpdater
 			var lastWriteTime = (DateTimeOffset)File.GetLastWriteTimeUtc(downloadFile);
 			var document = XDocument.Load(downloadFile);
 			var root = document.Root;
+			var addons = root.Elements("Addon");
 
 			var lastCheckDate = ParseDateTimeOffset(root.Attribute("lastCheck")?.Value);
 			var now = DateTimeOffset.Now;
-			if (lastCheckDate == null || now - lastCheckDate > TimeSpan.FromMinutes(10))
+			if (lastCheckDate == null || now - lastCheckDate > TimeSpan.FromMinutes(10) || addons.Any(o => o.Attribute("file")?.Value == null))
 			{
 				Console.WriteLine("Checking for updates...");
-
-				var addons = root.Elements("Addon");
 
 				var files = (await Task.WhenAll(addons.Select(o => Task.Run(() => DownloadFile(addonDirectory, o))))).Where(o => o != null);
 
@@ -145,13 +156,13 @@ namespace AddonUpdater
 				.Select(o => new
 				{
 					url = o.SelectSingleNode("td[2]/a").GetAttributeValue("href", ""),
-					version = o.SelectSingleNode("td[5]").InnerText.Trim()
+					version = Regex.Replace(o.SelectSingleNode("td[5]").InnerText, "\\s+", "")
 				});
 
 			switch (type)
 			{
 				case "_retail_": links = links.Where(o => !o.version.StartsWith("1.")); break;
-				case "_classic_": links = links.Where(o => o.version.StartsWith("1.")); break;
+				case "_classic_": links = links.Where(o => o.version.StartsWith("1.") || o.version.EndsWith("+1")); break;
 			}
 
 			var link =  links.FirstOrDefault();
@@ -182,6 +193,8 @@ namespace AddonUpdater
 
 			using (var client = new HttpClient())
 			{
+				client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36");
+
 				var downloadUrl = await GetDownloadUrl(type, url);
 				if (downloadUrl == null)
 				{
@@ -317,25 +330,6 @@ namespace AddonUpdater
 			return path.Split('/', '\\')[0];
 		}
 
-		private static readonly Regex versionRegex = new Regex(@"^\s+DisplayVersion\s*=\s*""([^""]*)""");
-		private static readonly Regex revisionRegex = new Regex(@"^\s+ReleaseRevision\s*=\s*(\d+)");
-
-		private static string GetDBMVersion(Stream stream)
-		{
-			var lines = ReadLines(stream).ToList();
-
-			var version = versionRegex.Match(lines.Single(o => versionRegex.IsMatch(o))).Groups[1].Value;
-
-			var revision = revisionRegex.Match(lines.Single(o => revisionRegex.IsMatch(o))).Groups[1].Value;
-			return $"{version}-r{revision}";
-		}
-
-		private static string GetAddOnMetadata(this ZipArchiveEntry entry, string type)
-		{
-			var prefix = $"## {type}:";
-			return ReadLines(entry.Open()).FirstOrDefault(o => o.StartsWith(prefix))?.Substring(prefix.Length).Trim();
-		}
-
 		private static IEnumerable<(string type, string folder)> GetExistingAddons(string type, string wowDirectory)
 		{
 			string toFullPath(string folder) => Path.Combine(wowDirectory, folder);
@@ -349,24 +343,6 @@ namespace AddonUpdater
 					&& !Directory.Exists(Path.Combine(path, ".git"))
 					&& !File.Exists(Path.Combine(path, ".keep")))
 				.Select(o => (type, o.Substring(wowDirectory.Length + 1)));
-		}
-
-		private static readonly Regex escapeSequences = new Regex(@"\|(?:c[0-9a-fA-F]{8}|r)");
-		private static string StripUIEscape(string text)
-		{
-			return escapeSequences.Replace(text, "");
-		}
-
-		private static IEnumerable<string> ReadLines(Stream stream)
-		{
-			using (var reader = new StreamReader(stream))
-			{
-				string line;
-				while ((line = reader.ReadLine()) != null)
-				{
-					yield return line;
-				}
-			}
 		}
 
 		private static HashSet<T> ToHashSet<T>(this IEnumerable<T> collection)
