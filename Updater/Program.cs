@@ -4,12 +4,11 @@ using System.Configuration;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-using System.Xml.Linq;
 using Microsoft.Win32;
 
 namespace AddonUpdater
@@ -27,10 +26,8 @@ namespace AddonUpdater
 				var addonDirectory = ConfigurationManager.AppSettings["AddonFolder"];
 				var wowFolderTemplate = GetWowFolderTemplate();
 
-				//await DownloadFiles(addonDirectory);
-
 				string toWowDirectory(string type) => wowFolderTemplate.Replace("{type}", type);
-				var addons = EnumerateAddonFiles(addonDirectory).Select(o => new Addon(o)).OrderBy(o => o.Archive).ToList();
+				var addons = await GetAddons(addonDirectory);
 
 				var types = addons.Select(o => o.Type).Distinct();
 
@@ -41,7 +38,7 @@ namespace AddonUpdater
 					from addon in addons
 					let type = addon.Type
 					from folder in addon.Folders
-					group addon by (type,folder)
+					group addon by (type, folder)
 					into folderAddons
 					where folderAddons.Count() > 1
 					from addon in folderAddons
@@ -100,178 +97,72 @@ namespace AddonUpdater
 			Console.ReadKey(true);
 		}
 
-		private static string GetWowFolderTemplate()
+		private static async Task<List<Addon>> GetAddons(string path)
+		{
+			var files = EnumerateAddonFiles(path).ToList();
+
+			var hash = files.Select(x => x.Substring(path.Length+1).ToLower()).Aggregate(SHA1.Create(), TransformString, GetFinalizedHashString);
+
+			var cacheFile = Path.Combine(path, "addons.json");
+
+			var cache = await DeserializeAsync<CacheFile>(cacheFile);
+			if (hash == cache?.Hash)
+			{
+				return cache.Data.Select(x => new Addon(path, x)).ToList();
+			}
+
+			var data = files.Select(o => new Addon(o)).OrderBy(o => o.Archive).ToList();
+
+			Serialize(cacheFile, new CacheFile
+			{
+				Hash = hash,
+				Data = data.Select(ToCache)
+			});
+
+			return data;
+		}
+
+		private static string GetWowFolderTemplate() => @$"{GetWowBasePath()}\{{type}}\Interface\AddOns";
+
+		private static readonly string[] possibleDrives = new[] { "C:\\", "D:\\" };
+		private static readonly string[] possibleBasePaths = new[] { @"Program Files\World of Warcraft", @"Program Files (x86)\World of Warcraft" };
+
+		private static string GetWowBasePath()
 		{
 			var installPath = (string)Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Blizzard Entertainment\World of Warcraft", "InstallPath", null);
-			if (installPath == null || !installPath.EndsWith(@"\_retail_\"))
-				throw new Exception("World of Warcraft install not found?");
-
-			var basePath = installPath.Substring(0, installPath.Length - 10);
-
-			return @$"{basePath}\{{type}}\Interface\AddOns";
-		}
-
-		private static IEnumerable<string> EnumerateAddonFiles(string addonDirectory)
-		{
-			return Directory.EnumerateFiles(addonDirectory, "*.zip", SearchOption.AllDirectories).Where(o => !Path.GetFileName(o).StartsWith("_"));
-		}
-
-		private static async Task DownloadFiles(string addonDirectory)
-		{
-			var downloadFile = Path.Combine(addonDirectory, "Download.xml");
-			var lastWriteTime = (DateTimeOffset)File.GetLastWriteTimeUtc(downloadFile);
-			var document = XDocument.Load(downloadFile);
-			var root = document.Root;
-			var addons = root.Elements("Addon");
-
-			var lastCheckDate = ParseDateTimeOffset(root.Attribute("lastCheck")?.Value);
-			var now = DateTimeOffset.Now;
-			if (lastCheckDate == null || now - lastCheckDate > TimeSpan.FromMinutes(10) || addons.Any(o => o.Attribute("file")?.Value == null))
+			if (installPath != null && installPath.EndsWith(@"\_retail_\"))
 			{
-				Console.WriteLine("Checking for updates...");
-
-				var files = (await Task.WhenAll(addons.Select(o => Task.Run(() => DownloadFile(addonDirectory, o))))).Where(o => o != null);
-
-				root.SetAttributeValue("lastCheck", lastCheckDate = now);
-				document.Save(downloadFile);
-
-				var extraFiles = EnumerateAddonFiles(addonDirectory).Except(files);
-				foreach (var extraFile in extraFiles)
-				{
-					Console.WriteLine($"Deleting {Path.GetFileName(extraFile)}");
-					File.Delete(extraFile);
-				}
-			}
-		}
-
-		private static async Task<string> GetCurseForgeUrl(string type, string url)
-		{
-			var addon = Path.GetFileName(Path.GetDirectoryName(url));
-
-			var web = new HtmlAgilityPack.HtmlWeb();
-			var doc = await web.LoadFromWebAsync(url);
-
-			var links = doc.DocumentNode.SelectNodes("//table/tbody/tr")
-				.Where(o => o.SelectSingleNode("td[1]").InnerText.Trim() == "R")
-				.Select(o => new
-				{
-					url = o.SelectSingleNode("td[2]/a").GetAttributeValue("href", ""),
-					version = Regex.Replace(o.SelectSingleNode("td[5]").InnerText, "\\s+", "")
-				});
-
-			switch (type)
-			{
-				case "_retail_": links = links.Where(o => !o.version.StartsWith("1.")); break;
-				case "_classic_": links = links.Where(o => o.version.StartsWith("1.") || o.version.EndsWith("+1")); break;
+				return installPath.Substring(0, installPath.Length - 10);
 			}
 
-			var link =  links.FirstOrDefault();
-			if (link == null)
+			installPath = possibleDrives.Join(possibleBasePaths, x => true, y => true, Path.Combine).FirstOrDefault(Directory.Exists);
+
+			if (installPath != null)
 			{
-				return null;
+				return installPath;
 			}
 
-			var relativeUrl = link.url.Replace("files", "download") + "/file";
-
-			return new Uri(new Uri(url), relativeUrl).AbsoluteUri;
+			throw new Exception("World of Warcraft install not found?");
 		}
 
-		private static Task<string> GetDownloadUrl(string type, string url)
+		private static IEnumerable<string> EnumerateAddonFiles(string addonDirectory) =>
+			Directory.EnumerateFiles(addonDirectory, "*.zip", SearchOption.AllDirectories).Where(o => !Path.GetFileName(o).StartsWith("_"));
+
+		private static string GetInstalledVersion(IEnumerable<string> directories, string wowDirectory) => CreateHashForFolder(directories.Select(path => Path.Combine(wowDirectory, path)).SelectMany(fullpath =>
+			Directory.Exists(fullpath) ? Directory.EnumerateFiles(fullpath, "*", SearchOption.AllDirectories).Select(o => (o.Substring(wowDirectory.Length + 1), (Stream)File.OpenRead(o))) : Enumerable.Empty<(string, Stream)>()
+		));
+
+		class CacheAddon
 		{
-			return url.Contains("curseforge.com") ? GetCurseForgeUrl(type, url) : Task.FromResult(url);
+			public string Path { get; set; }
+			public IReadOnlyCollection<string> Folders { get; set; }
+			public string Version { get; set; }
 		}
 
-		private static async Task<string> DownloadFile(string parentDirectory, XElement addon)
+		class CacheFile
 		{
-			var type = addon.Attribute("type")?.Value;
-			var url = addon.Attribute("url")?.Value;
-			var existingName = addon.Attribute("file")?.Value;
-			var existingSize = ParseLong(addon.Attribute("size")?.Value);
-			var existingLastModified = ParseDateTimeOffset(addon.Attribute("lastModified")?.Value);
-			var addonDirectory = Path.Combine(parentDirectory, type);
-			var existingPath = existingName != null ? Path.Combine(addonDirectory, existingName) : null;
-
-			using (var client = new HttpClient())
-			{
-				client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36");
-
-				var downloadUrl = await GetDownloadUrl(type, url);
-				if (downloadUrl == null)
-				{
-					Console.WriteLine($"ERROR: No download found for {type}: {url}");
-					return null;
-				}
-
-				var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, downloadUrl) { Headers = { IfModifiedSince = existingLastModified } });
-
-				if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
-				{
-					return Path.Combine(addonDirectory, existingName);
-				}
-
-				var fileName = response.Content.Headers.ContentDisposition?.FileName.Trim('"') ?? Path.GetFileName(UrlDecode(response.RequestMessage.RequestUri.LocalPath));
-				var fileSize = response.Content.Headers.ContentLength;
-				var lastModified = response.Content.Headers.LastModified;
-				var path = Path.Combine(addonDirectory, fileName);
-
-				if (!File.Exists(existingPath) || fileName != existingName || fileSize != existingSize || lastModified != existingLastModified)
-				{
-					Console.WriteLine($"Downloading {fileName}");
-
-					DeleteIfExists(addonDirectory, existingName);
-
-					var stream = await response.Content.ReadAsStreamAsync();
-
-					using (var file = File.OpenWrite(path))
-					{
-						stream.CopyTo(file);
-					}
-
-					addon.SetAttributeValue("file", fileName);
-					addon.SetAttributeValue("size", fileSize);
-					addon.SetAttributeValue("lastModified", lastModified);
-				}
-
-				return path;
-			}
-		}
-
-		private static string UrlDecode(string str)
-		{
-			return Uri.UnescapeDataString(str.Replace("+", " "));
-		}
-
-		private static long? ParseLong(string value)
-		{
-			return long.TryParse(value, out var result) ? (long?)result : null;
-		}
-
-		private static DateTimeOffset? ParseDateTimeOffset(string value)
-		{
-			return DateTimeOffset.TryParse(value, out var result) ? (DateTimeOffset?)result : null;
-		}
-
-		private static void DeleteIfExists(string directory, string file)
-		{
-			if (file != null)
-			{
-				var path = Path.Combine(directory, file);
-
-				if (File.Exists(path))
-				{
-					File.Delete(path);
-				}
-			}
-		}
-
-		private static string GetInstalledVersion(IEnumerable<string> directories, string wowDirectory)
-		{
-			return CreateHashForFolder(directories.Aggregate(Enumerable.Empty<(string, Stream)>(), (result, path) =>
-				{
-					var fullpath = Path.Combine(wowDirectory, path);
-					return Directory.Exists(fullpath) ? result.Concat(Directory.EnumerateFiles(fullpath, "*", SearchOption.AllDirectories).Select(o => (o.Substring(wowDirectory.Length + 1), (Stream)File.OpenRead(o)))) : result;
-				}
-			));
+			public string Hash { get; set; }
+			public IEnumerable<CacheAddon> Data { get; set; }
 		}
 
 		private class Addon
@@ -288,6 +179,14 @@ namespace AddonUpdater
 				}
 			}
 
+			public Addon(string path, CacheAddon cache)
+			{
+				Archive = Path.Combine(path, cache.Path);
+				Folders = cache.Folders;
+				Version = cache.Version;
+			}
+
+			[JsonIgnore]
 			public string Type { get { return Path.GetFileName(Path.GetDirectoryName(Archive)); } }
 
 			public string Archive { get; }
@@ -297,41 +196,67 @@ namespace AddonUpdater
 			public string Version { get; }
 		}
 
+		private static CacheAddon ToCache(Addon addon) => new()
+		{
+			Path = addon.Archive.Substring(Path.GetDirectoryName(Path.GetDirectoryName(addon.Archive)).Length+1),
+			Folders = addon.Folders,
+			Version = addon.Version
+		};
+
+		private readonly static JsonSerializerOptions JsonOptions = new()
+		{
+			PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+		};
+
+		private static async Task<T> DeserializeAsync<T>(string path)
+		{
+			if (!File.Exists(path))
+			{
+				return default;
+			}
+
+			using var stream = File.OpenRead(path);
+			return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions);
+		}
+
+		private static void Serialize<T>(string path, T obj) => File.WriteAllText(path, JsonSerializer.Serialize(obj, JsonOptions));
+
 		private static string CreateHashForFolder(IEnumerable<(string file, Stream stream)> files)
 		{
 			var hash = SHA1.Create();
 
+			int read;
 			var buffer = new byte[4096];
 
-			foreach (var item in files.OrderBy(o => o.file))
+			foreach (var (file, stream) in files.OrderBy(o => o.file))
 			{
-				using (item.stream)
-				{
-					// hash path
-					var pathBytes = Encoding.UTF8.GetBytes(item.file.ToLower());
-					hash.TransformBlock(pathBytes, 0, pathBytes.Length, pathBytes, 0);
+				// hash path
+				hash.TransformString(file.ToLower());
 
-					// hash contents
-					int read;
-					while ((read = item.stream.Read(buffer, 0, buffer.Length)) > 0)
+				// hash contents
+				using (stream)
+				{
+					while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
 					{
-						hash.TransformBlock(buffer, 0, read, buffer, 0);
+						hash.TransformBlock(buffer, read);
 					}
 				}
 			}
 
-			hash.TransformFinalBlock(new byte[0], 0, 0);
+			hash.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
 
-			return BitConverter.ToString(hash.Hash).Replace("-", "").ToLower();
+			return hash.GetHashString();
 		}
 
-		private static string GetBaseFolder(string path)
-		{
-			return path.Split('/', '\\')[0];
-		}
+		private static string GetBaseFolder(string path) => path.Split('/', '\\')[0];
 
 		private static IEnumerable<(string type, string folder)> GetExistingAddons(string type, string wowDirectory)
 		{
+			if (!Directory.Exists(wowDirectory))
+			{
+				return Enumerable.Empty<(string, string)>();
+			}
+
 			string toFullPath(string folder) => Path.Combine(wowDirectory, folder);
 
 			var keepFile = toFullPath(".keep");
@@ -357,5 +282,23 @@ namespace AddonUpdater
 				set.Remove(item);
 			}
 		}
+
+		private static T TransformString<T>(T hashAlgorithm, string text) where T : HashAlgorithm
+		{
+			hashAlgorithm.TransformBlock(Encoding.UTF8.GetBytes(text));
+			return hashAlgorithm;
+		}
+
+		private static string GetFinalizedHashString<T>(T hashAlgorithm) where T : HashAlgorithm
+		{
+			hashAlgorithm.TransformFinalBlock();
+			return hashAlgorithm.GetHashString();
+		}
+
+		public static int TransformString(this HashAlgorithm hashAlgorithm, string text) => hashAlgorithm.TransformBlock(Encoding.UTF8.GetBytes(text));
+		public static int TransformBlock(this HashAlgorithm hashAlgorithm, byte[] block) => hashAlgorithm.TransformBlock(block, block.Length);
+		public static int TransformBlock(this HashAlgorithm hashAlgorithm, byte[] block, int length) => hashAlgorithm.TransformBlock(block, 0, length, block, 0);
+		public static byte[] TransformFinalBlock(this HashAlgorithm hashAlgorithm) => hashAlgorithm.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+		public static string GetHashString(this HashAlgorithm hashAlgorithm) => BitConverter.ToString(hashAlgorithm.Hash).Replace("-", "").ToLower();
 	}
 }
