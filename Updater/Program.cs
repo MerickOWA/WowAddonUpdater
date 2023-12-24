@@ -15,11 +15,7 @@ namespace AddonUpdater
 {
 	internal static class Program
 	{
-		private static void Main(string[] args)
-		{
-			MainAsync(args).GetAwaiter().GetResult();
-		}
-		private static async Task MainAsync(string[] args)
+		private static async Task Main(string[] args)
 		{
 			try
 			{
@@ -80,11 +76,11 @@ namespace AddonUpdater
 					unused.RemoveAll(addon.Folders.Select(o => (addon.Type, o)));
 				}
 
-				foreach (var item in unused)
+				foreach (var (type, folder) in unused)
 				{
 					ranUpdate = true;
-					Console.WriteLine($"< {item.type}\\{item.folder}");
-					Directory.Delete(Path.Combine(toWowDirectory(item.type), item.folder), true);
+					Console.WriteLine($"< {type}\\{folder}");
+					Directory.Delete(Path.Combine(toWowDirectory(type), folder), true);
 				}
 
 				Console.WriteLine(ranUpdate ? "Done." : "No updates needed.");
