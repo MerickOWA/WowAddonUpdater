@@ -15,6 +15,8 @@ namespace AddonUpdater
 {
 	internal static class Program
 	{
+		private static void Log(string message) => Console.WriteLine($"{DateTime.Now:yyyy-MM-dd'T'HH:mm:ss.ff}: {message}");
+
 		private static async Task Main(string[] args)
 		{
 			try
@@ -22,12 +24,13 @@ namespace AddonUpdater
 				var addonDirectory = ConfigurationManager.AppSettings["AddonFolder"];
 				var wowFolderTemplate = GetWowFolderTemplate();
 
+				Log("Getting addons...");
 				string toWowDirectory(string type) => wowFolderTemplate.Replace("{type}", type);
 				var addons = await GetAddons(addonDirectory);
 
 				var types = addons.Select(o => o.Type).Distinct();
 
-				Console.WriteLine("Installing updates...");
+				Log("Installing updates...");
 				var unused = new[] { "_retail_", "_classic_" }.SelectMany(type => GetExistingAddons(type, toWowDirectory(type))).ToHashSet();
 
 				var conflicts = (
@@ -42,11 +45,10 @@ namespace AddonUpdater
 
 				foreach (var addon in conflicts)
 				{
-					Console.WriteLine($"ERROR: {Path.GetFileName(addon.Archive)} conflicts!");
+					Log($"ERROR: {Path.GetFileName(addon.Archive)} conflicts!");
 					unused.RemoveAll(addon.Folders.Select(o => (addon.Type, o)));
 				}
 
-				var ranUpdate = false;
 				foreach (var addon in addons.Except(conflicts))
 				{
 					var wowDirectory = toWowDirectory(addon.Type);
@@ -54,19 +56,17 @@ namespace AddonUpdater
 
 					if (addon.Version != installedVersion)
 					{
-						ranUpdate = true;
-
 						foreach (var folder in addon.Folders)
 						{
 							var path = Path.Combine(wowDirectory, folder);
 							if (Directory.Exists(path))
 							{
-								Console.WriteLine($"! {folder}");
+								Log($"! {addon.Type}\\{folder}");
 								Directory.Delete(path, true);
 							}
 							else
 							{
-								Console.WriteLine($"> {folder}");
+								Log($"> {addon.Type}\\{folder}");
 							}
 						}
 
@@ -76,46 +76,51 @@ namespace AddonUpdater
 					unused.RemoveAll(addon.Folders.Select(o => (addon.Type, o)));
 				}
 
+				Log("Removing old addons...");
 				foreach (var (type, folder) in unused)
 				{
-					ranUpdate = true;
-					Console.WriteLine($"< {type}\\{folder}");
+					Log($"< {type}\\{folder}");
 					Directory.Delete(Path.Combine(toWowDirectory(type), folder), true);
 				}
 
-				Console.WriteLine(ranUpdate ? "Done." : "No updates needed.");
+				Log("Done.");
 			}
 			catch (Exception e)
 			{
-				Console.WriteLine($"ERROR: {e}");
+				Log($"ERROR: {e}");
 			}
 
 			Console.ReadKey(true);
 		}
 
-		private static async Task<List<Addon>> GetAddons(string path)
+		private static async Task<IList<Addon>> GetAddons(string basePath)
 		{
-			var files = EnumerateAddonFiles(path).ToList();
+			var files = EnumerateAddonFiles(basePath);
 
-			var hash = files.Select(x => x.Substring(path.Length+1).ToLower()).Aggregate(SHA1.Create(), TransformString, GetFinalizedHashString);
+			string ToRelative(string path) => path.Substring(basePath.Length + 1);
 
-			var cacheFile = Path.Combine(path, "addons.json");
+			var cachePath = Path.Combine(basePath, "addons.json");
 
-			var cache = await DeserializeAsync<CacheFile>(cacheFile);
-			if (hash == cache?.Hash)
+			var cache = await DeserializeAsync<IEnumerable<CacheAddon>>(cachePath) ?? Enumerable.Empty<CacheAddon>();
+
+			var changed = false;
+			Addon ReadAddon(string path)
 			{
-				return cache.Data.Select(x => new Addon(path, x)).ToList();
+				changed = true;
+				Log($"Reading {ToRelative(path)}");
+				return new(path);
 			}
 
-			var data = files.Select(o => new Addon(o)).OrderBy(o => o.Archive).ToList();
+			var addons = files
+				.GroupJoin(cache, path => ToRelative(path).ToLower(), x => x.Path.ToLower(), (path, matches) => matches.SingleOrDefault()?.ToAddon(basePath) ?? ReadAddon(path))
+				.ToList();
 
-			Serialize(cacheFile, new CacheFile
+			if (changed)
 			{
-				Hash = hash,
-				Data = data.Select(ToCache)
-			});
+				Serialize(cachePath, addons.Select(ToCache));
+			}
 
-			return data;
+			return addons;
 		}
 
 		private static string GetWowFolderTemplate() => @$"{GetWowBasePath()}\{{type}}\Interface\AddOns";
@@ -141,8 +146,8 @@ namespace AddonUpdater
 			throw new Exception("World of Warcraft install not found?");
 		}
 
-		private static IEnumerable<string> EnumerateAddonFiles(string addonDirectory) =>
-			Directory.EnumerateFiles(addonDirectory, "*.zip", SearchOption.AllDirectories).Where(o => !Path.GetFileName(o).StartsWith("_"));
+		private static IList<string> EnumerateAddonFiles(string addonDirectory) =>
+			Directory.EnumerateFiles(addonDirectory, "*.zip", SearchOption.AllDirectories).Where(o => !Path.GetFileName(o).StartsWith("_")).ToList();
 
 		private static string GetInstalledVersion(IEnumerable<string> directories, string wowDirectory) => CreateHashForFolder(directories.Select(path => Path.Combine(wowDirectory, path)).SelectMany(fullpath =>
 			Directory.Exists(fullpath) ? Directory.EnumerateFiles(fullpath, "*", SearchOption.AllDirectories).Select(o => (o.Substring(wowDirectory.Length + 1), (Stream)File.OpenRead(o))) : Enumerable.Empty<(string, Stream)>()
@@ -192,6 +197,8 @@ namespace AddonUpdater
 			public string Version { get; }
 		}
 
+		private static Addon ToAddon(this CacheAddon cache, string basePath) => new(basePath, cache);
+
 		private static CacheAddon ToCache(Addon addon) => new()
 		{
 			Path = addon.Archive.Substring(Path.GetDirectoryName(Path.GetDirectoryName(addon.Archive)).Length+1),
@@ -211,8 +218,15 @@ namespace AddonUpdater
 				return default;
 			}
 
-			using var stream = File.OpenRead(path);
-			return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions);
+			try
+			{
+				using var stream = File.OpenRead(path);
+				return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions);
+			}
+			catch (JsonException)
+			{
+				return default;
+			}
 		}
 
 		private static void Serialize<T>(string path, T obj) => File.WriteAllText(path, JsonSerializer.Serialize(obj, JsonOptions));
